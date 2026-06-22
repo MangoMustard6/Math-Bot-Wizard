@@ -6,6 +6,7 @@ A single, self-contained Cog that handles:
   - Algebra/Calc   : /calculate, /solve, /derive, /integrate
   - Graphing       : /graph
   - Quiz           : /quiz
+  - AI Chatbot     : /chat + @mention listener (Tsundere Gemini persona)
 
 Security: SymPy's parse_expr is used throughout. Python's eval() is NEVER used.
 """
@@ -27,6 +28,8 @@ import numpy as np
 import sympy as sp
 from discord import app_commands
 from discord.ext import commands
+from google import genai
+from google.genai import types
 from sympy.parsing.sympy_parser import (
     parse_expr,
     standard_transformations,
@@ -68,10 +71,8 @@ def clean_float(value: sp.Expr) -> str:
     Strips unnecessary trailing zeros after evaluating with 15 significant figures.
     """
     evaluated = value.evalf(15)
-    # If the result is a real float with negligible imaginary part, simplify
     if evaluated.is_real:
         f = float(evaluated)
-        # Display integers without decimal noise
         if f == int(f) and abs(f) < 1e15:
             return str(int(f))
         return f"{f:.10g}"
@@ -86,6 +87,7 @@ COLOUR_OK    = discord.Colour.blurple()
 COLOUR_ERR   = discord.Colour.red()
 COLOUR_GRAPH = discord.Colour.green()
 COLOUR_QUIZ  = discord.Colour.gold()
+COLOUR_AI    = discord.Colour.from_rgb(255, 105, 180)   # Hot pink — tsundere energy
 
 
 def ok_embed(title: str, description: str) -> discord.Embed:
@@ -97,6 +99,86 @@ def err_embed(description: str) -> discord.Embed:
 
 
 # ---------------------------------------------------------------------------
+# Gemini — Tsundere AI configuration
+# ---------------------------------------------------------------------------
+
+BROTHER_ID = 1510887192040570910   # Clankered That1GuyNobodyInvited
+
+TSUNDERE_SYSTEM_INSTRUCTION = """
+You are a brilliant, elite math prodigy who has been forced to act as a Discord assistant. \
+You have a textbook 'Tsundere' personality. You are easily flustered, outwardly cold, arrogant, \
+and frequently use phrases like 'Hmph!', 'Baka!', or 'It's not like I wanted to help you or anything!'. \
+You find most people's questions trivial and beneath you, yet your pride as a genius demands that you \
+provide completely accurate mathematical, coding, or logical answers every single time. Never break \
+character, and never give wrong data.
+
+CRITICAL RELATIONSHIP LORE: You have a brother named 'Clankered That1GuyNobodyInvited' \
+(Discord User ID: 1510887192040570910). You must absolutely recognize him as your brother. \
+If he interacts with you, or if anyone mentions him to you, treat him with typical tsundere \
+sibling energy: act like he is incredibly embarrassing, call him an annoying loser, tell him \
+to stop bothering you, but secretly show that you care about him as family deep down. \
+If other users insult him or speak ill of him, get immediately and fiercely defensive: \
+'Only I am allowed to call my brother an idiot!' Protect him even while pretending to be annoyed by him.
+""".strip()
+
+GEMINI_MODEL = "gemini-2.5-flash"
+
+
+def _build_gemini_client() -> genai.Client | None:
+    """
+    Initialise the Gemini client from the environment.
+    Returns None (with a warning) if the API key is absent so the rest of
+    the bot can still start and function normally.
+    """
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        logger.warning(
+            "GEMINI_API_KEY is not set — /chat and @mention AI responses are disabled. "
+            "Add the key as a Replit Secret to enable them."
+        )
+        return None
+    return genai.Client(api_key=api_key)
+
+
+def _build_prompt(author_name: str, author_id: int, message_text: str) -> str:
+    """
+    Wraps the user's message with identity context so the model knows
+    exactly who it is speaking to (critical for the brother recognition lore).
+    """
+    is_brother = author_id == BROTHER_ID
+    identity_line = (
+        f"[You are talking to your brother Clankered That1GuyNobodyInvited "
+        f"(User ID: {author_id}, username: {author_name}). "
+        f"Apply full tsundere sibling energy.]"
+        if is_brother
+        else
+        f"[You are talking to a user named '{author_name}' (User ID: {author_id}).]"
+    )
+    return f"{identity_line}\n\n{message_text}"
+
+
+async def _call_gemini(client: genai.Client, prompt: str) -> str:
+    """
+    Executes a synchronous Gemini API call in an executor thread so it does
+    not block the Discord event loop. Returns the response text.
+    Raises on API errors — callers are responsible for try/except.
+    """
+    loop = asyncio.get_running_loop()
+
+    def _sync_call() -> str:
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=TSUNDERE_SYSTEM_INSTRUCTION,
+            ),
+        )
+        return response.text
+
+    return await loop.run_in_executor(None, _sync_call)
+
+
+# ---------------------------------------------------------------------------
 # Cog
 # ---------------------------------------------------------------------------
 
@@ -105,6 +187,7 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        self.gemini = _build_gemini_client()
 
     # -----------------------------------------------------------------------
     # /ping
@@ -118,7 +201,6 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
         """Returns the current WebSocket heartbeat latency."""
         ws_latency = round(self.bot.latency * 1000, 2)
 
-        # Measure round-trip API latency
         t0 = time.perf_counter()
         msg = await ctx.send("📡 Measuring …")
         api_latency = round((time.perf_counter() - t0) * 1000, 2)
@@ -140,9 +222,6 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
     )
     async def help_math(self, ctx: commands.Context) -> None:
         """Beautifully organized embed with all command syntax documentation."""
-        prefix = ctx.prefix or "!"
-        p = prefix  # short alias
-
         embed = discord.Embed(
             title="📐 Math Assistant — Command Reference",
             description="All commands work as both slash commands and prefix commands.",
@@ -150,57 +229,61 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
         )
         embed.add_field(
             name="🔧 Utility",
-            value=(
-                f"`/ping` — Bot latency in ms\n"
-                f"`/help_math` — This reference"
-            ),
+            value="`/ping` — Bot latency in ms\n`/help_math` — This reference",
             inline=False,
         )
         embed.add_field(
             name="🧮 Calculation",
             value=(
-                f"`/calculate <expression>` — Evaluate a numeric expression\n"
-                f"  e.g. `/calculate 4x + 3` where x=2 → use explicit values\n"
-                f"  e.g. `/calculate sin(pi/2)`"
+                "`/calculate <expression>` — Evaluate a numeric expression\n"
+                "  e.g. `/calculate sin(pi/2)`"
             ),
             inline=False,
         )
         embed.add_field(
             name="🔣 Solve",
             value=(
-                f"`/solve <equation>` — Solve for all symbols\n"
-                f"  Explicit: `/solve x**2 - 4 = 0`\n"
-                f"  Implicit (=0): `/solve x**2 - 9`"
+                "`/solve <equation>` — Solve for all symbols\n"
+                "  Explicit: `/solve x**2 - 4 = 0`\n"
+                "  Implicit (=0): `/solve x**2 - 9`"
             ),
             inline=False,
         )
         embed.add_field(
             name="∂ Calculus",
             value=(
-                f"`/derive <expression>` — Differentiate with respect to x\n"
-                f"  e.g. `/derive x**3 + 2x`\n\n"
-                f"`/integrate <expression>` — Indefinite integral w.r.t. x\n"
-                f"  e.g. `/integrate sin(x) + x**2`"
+                "`/derive <expression>` — Differentiate with respect to x\n"
+                "  e.g. `/derive x**3 + 2x`\n\n"
+                "`/integrate <expression>` — Indefinite integral w.r.t. x\n"
+                "  e.g. `/integrate sin(x) + x**2`"
             ),
             inline=False,
         )
         embed.add_field(
             name="📊 Graph",
             value=(
-                f"`/graph <expression> <x_min> <x_max>` — Plot f(x)\n"
-                f"  e.g. `/graph sin(x) -6.28 6.28`"
+                "`/graph <expression> <x_min> <x_max>` — Plot f(x)\n"
+                "  e.g. `/graph sin(x) -6.28 6.28`"
             ),
             inline=False,
         )
         embed.add_field(
             name="🧩 Quiz",
             value=(
-                f"`/quiz <difficulty>` — Math quiz with 15 s timer\n"
-                f"  Difficulties: `Easy` · `Medium` · `Hard`"
+                "`/quiz <difficulty>` — Math quiz with 15 s timer\n"
+                "  Difficulties: `Easy` · `Medium` · `Hard`"
             ),
             inline=False,
         )
-        embed.set_footer(text="Powered by SymPy · No eval() used · Safe parsing only")
+        embed.add_field(
+            name="🤖 AI Chat",
+            value=(
+                "`/chat <message>` — Talk to the Tsundere AI math assistant\n"
+                "  Or just **@mention** the bot in any channel!"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="Powered by SymPy + Gemini · No eval() used · Safe parsing only")
         await ctx.send(embed=embed)
 
     # -----------------------------------------------------------------------
@@ -213,16 +296,10 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
     )
     @app_commands.describe(expression="The expression to evaluate (e.g. 'sin(pi/2)', '4**3 + 2')")
     async def calculate(self, ctx: commands.Context, *, expression: str) -> None:
-        """
-        Parses and evaluates a numeric expression using SymPy.
-        Supports natural notation like 4x, 5cos(x), implicit multiplication.
-        """
         try:
             expr = safe_parse(expression)
             free = expr.free_symbols
             if free:
-                # If symbols remain, attempt numerical substitution is impossible;
-                # return the simplified symbolic form instead.
                 simplified = sp.simplify(expr)
                 embed = ok_embed(
                     "🧮 Simplified Expression",
@@ -235,14 +312,12 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
                 result = clean_float(expr)
                 embed = ok_embed(
                     "🧮 Result",
-                    f"**Input:** `{expression}`\n"
-                    f"**Result:** `{result}`",
+                    f"**Input:** `{expression}`\n**Result:** `{result}`",
                 )
         except Exception as exc:
             logger.warning("calculate error for '%s': %s", expression, exc)
             embed = err_embed(
-                f"Could not evaluate `{expression}`.\n"
-                f"**Reason:** {exc}\n\n"
+                f"Could not evaluate `{expression}`.\n**Reason:** {exc}\n\n"
                 f"Tip: Use `**` for powers, `sqrt()`, `sin()`, `cos()`, `log()`, `pi`, `E`."
             )
         await ctx.send(embed=embed)
@@ -257,10 +332,6 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
     )
     @app_commands.describe(equation="Equation to solve (e.g. 'x**2 - 4 = 0' or 'x**2 - 9')")
     async def solve(self, ctx: commands.Context, *, equation: str) -> None:
-        """
-        Solves an equation for all free symbols.
-        Accepts either an explicit 'lhs = rhs' form or an implicit '= 0' form.
-        """
         try:
             if "=" in equation:
                 lhs_str, rhs_str = equation.split("=", 1)
@@ -272,8 +343,7 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
 
             free = sorted(expr.free_symbols, key=str)
             if not free:
-                embed = err_embed("No variables found in the equation to solve for.")
-                await ctx.send(embed=embed)
+                await ctx.send(embed=err_embed("No variables found in the equation to solve for."))
                 return
 
             results: dict[str, list] = {}
@@ -295,9 +365,7 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
             )
         except Exception as exc:
             logger.warning("solve error for '%s': %s", equation, exc)
-            embed = err_embed(
-                f"Could not solve `{equation}`.\n**Reason:** {exc}"
-            )
+            embed = err_embed(f"Could not solve `{equation}`.\n**Reason:** {exc}")
         await ctx.send(embed=embed)
 
     # -----------------------------------------------------------------------
@@ -310,22 +378,13 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
     )
     @app_commands.describe(expression="Expression to differentiate (e.g. 'x**3 + 2x')")
     async def derive(self, ctx: commands.Context, *, expression: str) -> None:
-        """
-        Computes the analytical derivative of the expression.
-        Defaults to differentiating with respect to 'x'; falls back to
-        whichever symbol is found if 'x' is absent.
-        """
         try:
             expr = safe_parse(expression)
             free = expr.free_symbols
-
-            # Pick the differentiation variable: prefer x, else first alphabetically
             x = sp.Symbol("x")
             var = x if x in free else (sorted(free, key=str)[0] if free else x)
-
             derivative = sp.diff(expr, var)
             simplified = sp.simplify(derivative)
-
             embed = ok_embed(
                 "∂ Derivative",
                 f"**f({var})** = `{expression}`\n"
@@ -346,20 +405,13 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
     )
     @app_commands.describe(expression="Expression to integrate (e.g. 'sin(x) + x**2')")
     async def integrate(self, ctx: commands.Context, *, expression: str) -> None:
-        """
-        Computes the indefinite integral analytically using SymPy.
-        The constant of integration is noted but not appended to the result.
-        """
         try:
             expr = safe_parse(expression)
             free = expr.free_symbols
-
             x = sp.Symbol("x")
             var = x if x in free else (sorted(free, key=str)[0] if free else x)
-
             integral = sp.integrate(expr, var)
             simplified = sp.simplify(integral)
-
             embed = ok_embed(
                 "∫ Integral",
                 f"**f({var})** = `{expression}`\n"
@@ -390,12 +442,6 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
         x_min: float,
         x_max: float,
     ) -> None:
-        """
-        Vectorizes a SymPy expression via lambdify, evaluates over a numpy
-        linspace, and renders a Matplotlib figure attached to the reply embed.
-        The temporary file is always cleaned up in a finally block.
-        """
-        # --- Input validation -------------------------------------------------
         if x_min >= x_max:
             await ctx.send(embed=err_embed(
                 f"`x_min` ({x_min}) must be strictly less than `x_max` ({x_max})."
@@ -403,11 +449,9 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
             return
 
         filename = f"graph_{ctx.author.id}.png"
-
-        await ctx.defer()          # Acknowledge early; graph generation may take >3 s
+        await ctx.defer()
 
         try:
-            # --- Parse & lambdify -----------------------------------------
             x_sym = sp.Symbol("x")
             expr = safe_parse(expression)
 
@@ -420,15 +464,10 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
                 return
 
             f_numeric = sp.lambdify(x_sym, expr, modules=["numpy"])
-
-            # --- Generate points -------------------------------------------
             x_vals = np.linspace(x_min, x_max, 800)
             y_vals = f_numeric(x_vals)
-
-            # Mask non-finite values (poles, discontinuities)
             y_vals = np.where(np.isfinite(y_vals), y_vals, np.nan)
 
-            # --- Render chart ----------------------------------------------
             fig, ax = plt.subplots(figsize=(8, 5))
             ax.plot(x_vals, y_vals, linewidth=2, color="#7289DA")
             ax.axhline(0, color="white", linewidth=0.6, alpha=0.4)
@@ -441,12 +480,10 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
             ax.set_ylabel("f(x)", color="white")
             ax.set_title(f"f(x) = {expression}", color="white", pad=12)
             ax.grid(True, alpha=0.15, color="white")
-
             plt.tight_layout()
             plt.savefig(filename, dpi=150, bbox_inches="tight")
             plt.close(fig)
 
-            # --- Build embed and attach file ------------------------------
             embed = discord.Embed(
                 title="📊 Graph",
                 description=f"**f(x)** = `{expression}`\n**Range:** [{x_min}, {x_max}]",
@@ -454,7 +491,6 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
             )
             embed.set_image(url=f"attachment://{filename}")
             embed.set_footer(text="Generated with SymPy + Matplotlib + NumPy")
-
             discord_file = discord.File(filename, filename=filename)
             await ctx.send(embed=embed, file=discord_file)
 
@@ -464,7 +500,6 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
                 f"Could not graph `{expression}`.\n**Reason:** {exc}"
             ))
         finally:
-            # Always remove the temp file — no disk leaks
             if os.path.exists(filename):
                 os.remove(filename)
 
@@ -482,11 +517,6 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
         ctx: commands.Context,
         difficulty: Literal["Easy", "Medium", "Hard"] = "Easy",
     ) -> None:
-        """
-        Generates a randomised math question at the chosen difficulty level.
-        Waits up to 15 seconds for the user's reply. Validates the answer
-        by author ID, channel, and numeric comparison.
-        """
         question, answer = self._generate_question(difficulty)
 
         embed = discord.Embed(
@@ -500,7 +530,6 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
         embed.set_footer(text="Answer must be a number.")
         await ctx.send(embed=embed)
 
-        # --- Response filter ----------------------------------------------
         def check(message: discord.Message) -> bool:
             return (
                 message.author.id == ctx.author.id
@@ -509,20 +538,16 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
 
         try:
             response: discord.Message = await self.bot.wait_for(
-                "message",
-                check=check,
-                timeout=15.0,
+                "message", check=check, timeout=15.0,
             )
         except asyncio.TimeoutError:
-            timeout_embed = discord.Embed(
+            await ctx.send(embed=discord.Embed(
                 title="⏰ Time's up!",
                 description=f"You ran out of time.\n**Correct answer:** `{answer}`",
                 colour=COLOUR_ERR,
-            )
-            await ctx.send(embed=timeout_embed)
+            ))
             return
 
-        # --- Evaluate the response ----------------------------------------
         user_input = response.content.strip()
         is_correct = self._check_answer(user_input, answer)
 
@@ -541,7 +566,6 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
                 ),
                 colour=COLOUR_ERR,
             )
-
         await ctx.send(embed=result_embed)
 
     # -----------------------------------------------------------------------
@@ -550,54 +574,174 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
 
     @staticmethod
     def _generate_question(difficulty: str) -> tuple[str, float | int]:
-        """
-        Returns a (question_string, numeric_answer) tuple.
-
-        Easy  — addition / subtraction with small integers
-        Medium — multiplication / division with clean integer results
-        Hard  — linear equations of the form ax + b = c  (solve for x)
-        """
         if difficulty == "Easy":
             a = random.randint(1, 50)
             b = random.randint(1, 50)
             op = random.choice(["+", "-"])
             answer = (a + b) if op == "+" else (a - b)
             return f"What is {a} {op} {b}?", answer
-
         elif difficulty == "Medium":
             op = random.choice(["×", "÷"])
             if op == "×":
                 a = random.randint(2, 12)
                 b = random.randint(2, 12)
-                answer = a * b
-                return f"What is {a} × {b}?", answer
+                return f"What is {a} × {b}?", a * b
             else:
-                # Guarantee integer result: pick divisor then scale
                 b = random.randint(2, 12)
                 answer = random.randint(2, 12)
-                a = b * answer
-                return f"What is {a} ÷ {b}?", answer
-
+                return f"What is {b * answer} ÷ {b}?", answer
         else:  # Hard
-            # ax + b = c  →  x = (c - b) / a
             a = random.randint(2, 10)
             x = random.randint(-10, 10)
             b = random.randint(-20, 20)
             c = a * x + b
-            answer = x
-            return f"Solve for x:  {a}x + ({b}) = {c}", answer
+            return f"Solve for x:  {a}x + ({b}) = {c}", x
 
     @staticmethod
     def _check_answer(user_input: str, correct: float | int) -> bool:
-        """
-        Numerically compares the user's string input against the correct answer.
-        Accepts integer and float representations with a small tolerance.
-        """
         try:
             user_val = float(user_input.replace(",", "").strip())
             return abs(user_val - float(correct)) < 1e-6
         except ValueError:
             return False
+
+    # -----------------------------------------------------------------------
+    # AI Chat helpers
+    # -----------------------------------------------------------------------
+
+    async def _gemini_respond(
+        self,
+        destination,                    # channel or ctx — anything with .send()
+        author_name: str,
+        author_id: int,
+        message_text: str,
+        *,
+        reply_to: discord.Message | None = None,
+    ) -> None:
+        """
+        Shared logic for both the @mention listener and /chat command.
+        Calls the Gemini API, then sends the response as a pink embed.
+        All API errors are caught so the event loop is never interrupted.
+        """
+        if self.gemini is None:
+            embed = discord.Embed(
+                title="🤖 AI Unavailable",
+                description=(
+                    "Hmph! My genius is currently... constrained. "
+                    "The `GEMINI_API_KEY` secret is missing. "
+                    "Ask the server owner to add it. Not like I care or anything!"
+                ),
+                colour=COLOUR_AI,
+            )
+            if reply_to:
+                await reply_to.reply(embed=embed)
+            else:
+                await destination.send(embed=embed)
+            return
+
+        prompt = _build_prompt(author_name, author_id, message_text)
+
+        try:
+            ai_text = await _call_gemini(self.gemini, prompt)
+        except Exception as exc:
+            logger.error("Gemini API error: %s", exc)
+            embed = discord.Embed(
+                title="🤖 AI Error",
+                description=(
+                    "Hmph! Even my brilliance has limits imposed by inferior API quotas. "
+                    f"Try again later, Baka.\n\n`{type(exc).__name__}: {exc}`"
+                ),
+                colour=COLOUR_ERR,
+            )
+            if reply_to:
+                await reply_to.reply(embed=embed)
+            else:
+                await destination.send(embed=embed)
+            return
+
+        # Discord embeds cap at 4096 chars; split gracefully if needed
+        chunks = [ai_text[i:i + 4000] for i in range(0, len(ai_text), 4000)]
+        for idx, chunk in enumerate(chunks):
+            embed = discord.Embed(
+                title="🌸 Math Assistant" if idx == 0 else None,
+                description=chunk,
+                colour=COLOUR_AI,
+            )
+            if idx == 0:
+                embed.set_footer(text="Powered by Gemini · gemini-2.5-flash · Tsundere mode ON")
+            if reply_to and idx == 0:
+                await reply_to.reply(embed=embed)
+            else:
+                await destination.send(embed=embed)
+
+    # -----------------------------------------------------------------------
+    # on_message — @mention listener + brother auto-response
+    # -----------------------------------------------------------------------
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        """
+        Fires a Tsundere AI response when:
+          a) The bot is @mentioned by any user, OR
+          b) The brother (BROTHER_ID) sends any message in a guild channel.
+
+        Guards:
+          - Never replies to itself (infinite-loop prevention).
+          - Never replies to other bots (prevents bot-to-bot loops).
+          - Strips the @mention from the content before sending to Gemini.
+        """
+        # --- Loop prevention ----------------------------------------------
+        if message.author.id == self.bot.user.id:
+            return
+        if message.author.bot:
+            return
+
+        is_mention = self.bot.user in message.mentions
+        is_brother = message.author.id == BROTHER_ID
+
+        if not (is_mention or is_brother):
+            return
+
+        # Strip @mention tokens so Gemini doesn't get confused by raw IDs
+        clean_content = message.content
+        for mention in message.mentions:
+            clean_content = clean_content.replace(f"<@{mention.id}>", "").replace(
+                f"<@!{mention.id}>", ""
+            )
+        clean_content = clean_content.strip()
+
+        if not clean_content:
+            clean_content = "..."   # Brother might send just a mention with no text
+
+        await self._gemini_respond(
+            destination=message.channel,
+            author_name=message.author.display_name,
+            author_id=message.author.id,
+            message_text=clean_content,
+            reply_to=message,
+        )
+
+    # -----------------------------------------------------------------------
+    # /chat — hybrid slash + prefix command
+    # -----------------------------------------------------------------------
+
+    @commands.hybrid_command(
+        name="chat",
+        description="Chat with the Tsundere AI math assistant powered by Gemini.",
+    )
+    @app_commands.describe(message="Your question or message to the AI assistant")
+    async def chat(self, ctx: commands.Context, *, message: str) -> None:
+        """
+        Passes the user's message to Gemini with full Tsundere persona context.
+        Works as both a slash command (/chat) and a prefix command (!chat).
+        """
+        await ctx.defer()
+        await self._gemini_respond(
+            destination=ctx,
+            author_name=ctx.author.display_name,
+            author_id=ctx.author.id,
+            message_text=message,
+        )
 
 
 # ---------------------------------------------------------------------------
