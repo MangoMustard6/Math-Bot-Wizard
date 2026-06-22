@@ -124,8 +124,31 @@ async def main() -> None:
         raise RuntimeError("DISCORD_TOKEN environment variable is missing.")
 
     bot = MathBot()
-    async with bot:
-        await bot.start(token)
+    try:
+        async with bot:
+            await bot.start(token)
+    except discord.PrivilegedIntentsRequired:
+        logger.error(
+            "\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "  PRIVILEGED INTENT NOT ENABLED\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "  The 'Message Content Intent' must be enabled in the\n"
+            "  Discord Developer Portal before the bot can start.\n\n"
+            "  Steps:\n"
+            "    1. Go to https://discord.com/developers/applications\n"
+            "    2. Select your application → Bot\n"
+            "    3. Scroll to 'Privileged Gateway Intents'\n"
+            "    4. Enable: MESSAGE CONTENT INTENT\n"
+            "    5. Save Changes, then restart this bot.\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
+        raise SystemExit(1)
+    except discord.LoginFailure:
+        logger.error(
+            "Invalid DISCORD_TOKEN — check the token in your Replit Secrets."
+        )
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
