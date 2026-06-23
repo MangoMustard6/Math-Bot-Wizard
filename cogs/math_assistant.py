@@ -626,19 +626,15 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
         All API errors are caught so the event loop is never interrupted.
         """
         if self.groq is None:
-            embed = discord.Embed(
-                title="🤖 AI Unavailable",
-                description=(
-                    "Hmph! My genius is currently... constrained. "
-                    "The `GROQ_API_KEY` secret is missing. "
-                    "Ask the server owner to add it. Not like I care or anything!"
-                ),
-                colour=COLOUR_AI,
+            msg = (
+                "Hmph! My genius is currently... constrained. "
+                "The `GROQ_API_KEY` secret is missing. "
+                "Ask the server owner to add it. Not like I care or anything!"
             )
             if reply_to:
-                await reply_to.reply(embed=embed)
+                await reply_to.reply(msg)
             else:
-                await destination.send(embed=embed)
+                await destination.send(msg)
             return
 
         user_content = _build_user_content(author_name, author_id, message_text)
@@ -647,34 +643,23 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
             ai_text = await _call_groq(self.groq, user_content)
         except Exception as exc:
             logger.error("Groq API error: %s", exc)
-            embed = discord.Embed(
-                title="🤖 AI Error",
-                description=(
-                    "Hmph! Even my brilliance has limits imposed by inferior API quotas. "
-                    f"Try again later, Baka.\n\n`{type(exc).__name__}: {exc}`"
-                ),
-                colour=COLOUR_ERR,
+            msg = (
+                "Hmph! Even my brilliance has limits imposed by inferior API quotas. "
+                f"Try again later, Baka.\n\n`{type(exc).__name__}: {exc}`"
             )
             if reply_to:
-                await reply_to.reply(embed=embed)
+                await reply_to.reply(msg)
             else:
-                await destination.send(embed=embed)
+                await destination.send(msg)
             return
 
-        # Discord embeds cap at 4096 chars; split gracefully if needed
-        chunks = [ai_text[i:i + 4000] for i in range(0, len(ai_text), 4000)]
+        # Discord messages cap at 2000 chars; split gracefully if needed
+        chunks = [ai_text[i:i + 2000] for i in range(0, len(ai_text), 2000)]
         for idx, chunk in enumerate(chunks):
-            embed = discord.Embed(
-                title="🌸 Math Assistant" if idx == 0 else None,
-                description=chunk,
-                colour=COLOUR_AI,
-            )
-            if idx == 0:
-                embed.set_footer(text="Powered by Groq · llama-3.3-70b-versatile · Tsundere mode ON")
             if reply_to and idx == 0:
-                await reply_to.reply(embed=embed)
+                await reply_to.reply(chunk)
             else:
-                await destination.send(embed=embed)
+                await destination.send(chunk)
 
     # -----------------------------------------------------------------------
     # on_message — @mention listener + brother auto-response
@@ -770,28 +755,20 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
 
         if channel_id in self.autoreply_channels:
             self.autoreply_channels.discard(channel_id)
-            embed = discord.Embed(
-                title="🔕 Auto-Reply OFF",
-                description=(
-                    f"Hmph! Fine, I'll stop replying to every little thing in "
-                    f"{ctx.channel.mention}. It's not like I enjoyed it anyway!"
-                ),
-                colour=discord.Colour.red(),
+            msg = (
+                f"🔕 Hmph! Fine, I'll stop replying to every little thing in "
+                f"{ctx.channel.mention}. It's not like I enjoyed it anyway!"
             )
         else:
             self.autoreply_channels.add(channel_id)
-            embed = discord.Embed(
-                title="🔔 Auto-Reply ON",
-                description=(
-                    f"I-it's not like I *want* to respond to everything in "
-                    f"{ctx.channel.mention}! But fine... I'll grace every message "
-                    f"with my genius. Don't get used to it, Baka!"
-                ),
-                colour=COLOUR_AI,
+            msg = (
+                f"🔔 I-it's not like I *want* to respond to everything in "
+                f"{ctx.channel.mention}! But fine... I'll grace every message "
+                f"with my genius. Don't get used to it, Baka! "
+                f"*(Active auto-reply channels: {len(self.autoreply_channels)})*"
             )
 
-        embed.set_footer(text=f"Active auto-reply channels: {len(self.autoreply_channels)}")
-        await ctx.send(embed=embed)
+        await ctx.send(msg)
 
 
 # ---------------------------------------------------------------------------

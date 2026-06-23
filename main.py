@@ -46,7 +46,7 @@ class MathBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
 
-        prefix = os.getenv("DEFAULT_PREFIX", "!")
+        prefix = os.getenv("DEFAULT_PREFIX", "tm?")
 
         super().__init__(
             command_prefix=prefix,
@@ -68,6 +68,9 @@ class MathBot(commands.Bot):
         except Exception:
             logger.exception("Failed to load cog 'cogs.math_assistant'")
             raise
+
+    async def is_owner(self, user: discord.User) -> bool:
+        return user.id == 1355759019330895973
 
     async def on_ready(self) -> None:
         logger.info("Bot online — logged in as %s (ID: %s)", self.user, self.user.id)
