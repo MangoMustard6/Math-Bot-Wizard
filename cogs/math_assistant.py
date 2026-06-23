@@ -182,6 +182,24 @@ async def _call_groq(client: Groq, user_content: str) -> str:
 # Cog
 # ---------------------------------------------------------------------------
 
+AUTOREPLY_FILE = "autoreply_channels.json"
+
+
+def _load_autoreply_channels() -> set[int]:
+    try:
+        import json
+        with open(AUTOREPLY_FILE, "r") as f:
+            return set(json.load(f))
+    except (FileNotFoundError, ValueError):
+        return set()
+
+
+def _save_autoreply_channels(channels: set[int]) -> None:
+    import json
+    with open(AUTOREPLY_FILE, "w") as f:
+        json.dump(list(channels), f)
+
+
 class MathAssistant(commands.Cog, name="Math Assistant"):
     """Core Cog for the Math Assistant bot."""
 
@@ -189,7 +207,7 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
         self.bot = bot
         self.groq = _build_groq_client()
         # Channels where every message gets an AI auto-reply (toggled by /autoreply2)
-        self.autoreply_channels: set[int] = set()
+        self.autoreply_channels: set[int] = _load_autoreply_channels()
 
     # -----------------------------------------------------------------------
     # /ping
@@ -637,6 +655,8 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
                 await destination.send(msg)
             return
 
+        await asyncio.sleep(random.uniform(5, 7.5))
+
         user_content = _build_user_content(author_name, author_id, message_text)
 
         try:
@@ -755,12 +775,14 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
 
         if channel_id in self.autoreply_channels:
             self.autoreply_channels.discard(channel_id)
+            _save_autoreply_channels(self.autoreply_channels)
             msg = (
                 f"🔕 Hmph! Fine, I'll stop replying to every little thing in "
                 f"{ctx.channel.mention}. It's not like I enjoyed it anyway!"
             )
         else:
             self.autoreply_channels.add(channel_id)
+            _save_autoreply_channels(self.autoreply_channels)
             msg = (
                 f"🔔 I-it's not like I *want* to respond to everything in "
                 f"{ctx.channel.mention}! But fine... I'll grace every message "
