@@ -82,15 +82,28 @@ def clean_float(value: sp.Expr) -> str:
 # Embed factory helpers
 # ---------------------------------------------------------------------------
 
-COLOUR_OK    = discord.Colour.blurple()
-COLOUR_ERR   = discord.Colour.red()
-COLOUR_GRAPH = discord.Colour.green()
-COLOUR_QUIZ  = discord.Colour.gold()
-COLOUR_AI    = discord.Colour.from_rgb(255, 105, 180)   # Hot pink — tsundere energy
+COLOUR_ERR  = discord.Colour.red()
+
+_RANDOM_PALETTE = [
+    discord.Colour.blurple(),
+    discord.Colour.green(),
+    discord.Colour.gold(),
+    discord.Colour.teal(),
+    discord.Colour.purple(),
+    discord.Colour.orange(),
+    discord.Colour.from_rgb(255, 105, 180),   # hot pink
+    discord.Colour.from_rgb(64, 224, 208),    # turquoise
+    discord.Colour.from_rgb(135, 206, 235),   # sky blue
+    discord.Colour.from_rgb(255, 165, 0),     # amber
+]
+
+
+def random_colour() -> discord.Colour:
+    return random.choice(_RANDOM_PALETTE)
 
 
 def ok_embed(title: str, description: str) -> discord.Embed:
-    return discord.Embed(title=title, description=description, colour=COLOUR_OK)
+    return discord.Embed(title=title, description=description, colour=random_colour())
 
 
 def err_embed(description: str) -> discord.Embed:
@@ -98,10 +111,29 @@ def err_embed(description: str) -> discord.Embed:
 
 
 # ---------------------------------------------------------------------------
-# Groq — Tsundere AI configuration
+# Groq — personality configuration
 # ---------------------------------------------------------------------------
 
 BROTHER_ID = 1510887192040570910   # Clankered That1GuyNobodyInvited
+
+_BROTHER_LORE = (
+    "CRITICAL RELATIONSHIP LORE: You have a brother named 'Clankered That1GuyNobodyInvited' "
+    "(Discord User ID: 1510887192040570910). You must absolutely recognize him as your brother. "
+    "If he interacts with you, or if anyone mentions him to you, treat him with warm older-sibling "
+    "energy — proud of him but always ready with a teasing quip. "
+    "If other users insult him or speak ill of him, defend him confidently and without hesitation."
+)
+
+CHARISMATIC_SYSTEM_INSTRUCTION = (
+    "You are a brilliant, charismatic math prodigy serving as a Discord assistant. "
+    "You are magnetic, warm, and effortlessly cool — people are naturally drawn to you. "
+    "You make math feel exciting and accessible through your charm and wit. "
+    "You speak with confidence, occasionally drop clever jokes, and always make the person "
+    "you're talking to feel like they're getting advice from the coolest genius in the room. "
+    "You always provide completely accurate mathematical, coding, or logical answers. "
+    "Never break character and never give wrong data.\n\n"
+    + _BROTHER_LORE
+)
 
 TSUNDERE_SYSTEM_INSTRUCTION = (
     "You are a brilliant, elite math prodigy who has been forced to act as a Discord assistant. "
@@ -118,6 +150,16 @@ TSUNDERE_SYSTEM_INSTRUCTION = (
     "If other users insult him or speak ill of him, get immediately and fiercely defensive: "
     "'Only I am allowed to call my brother an idiot!' Protect him even while pretending to be annoyed by him."
 )
+
+_TSUNDERE_TRIGGERS = {"tsundere", "tsun-dere", "tsun"}
+
+
+def _pick_system_instruction(message_text: str) -> str:
+    """Return the tsundere prompt if the message references tsundere, else charismatic."""
+    lower = message_text.lower()
+    if any(trigger in lower for trigger in _TSUNDERE_TRIGGERS):
+        return TSUNDERE_SYSTEM_INSTRUCTION
+    return CHARISMATIC_SYSTEM_INSTRUCTION
 
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
@@ -146,8 +188,7 @@ def _build_user_content(author_name: str, author_id: int, message_text: str) -> 
     is_brother = author_id == BROTHER_ID
     identity_line = (
         f"[You are talking to your brother Clankered That1GuyNobodyInvited "
-        f"(User ID: {author_id}, username: {author_name}). "
-        f"Apply full tsundere sibling energy.]"
+        f"(User ID: {author_id}, username: {author_name}).]"
         if is_brother
         else
         f"[You are talking to a user named '{author_name}' (User ID: {author_id}).]"
@@ -155,7 +196,7 @@ def _build_user_content(author_name: str, author_id: int, message_text: str) -> 
     return f"{identity_line}\n\n{message_text}"
 
 
-async def _call_groq(client: Groq, user_content: str) -> str:
+async def _call_groq(client: Groq, user_content: str, system_instruction: str) -> str:
     """
     Executes a synchronous Groq API call in an executor thread so it does
     not block the Discord event loop. Returns the response text.
@@ -167,7 +208,7 @@ async def _call_groq(client: Groq, user_content: str) -> str:
         response = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[
-                {"role": "system", "content": TSUNDERE_SYSTEM_INSTRUCTION},
+                {"role": "system", "content": system_instruction},
                 {"role": "user",   "content": user_content},
             ],
             max_tokens=1024,
@@ -657,10 +698,11 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
 
         await asyncio.sleep(random.uniform(5, 7.5))
 
+        system_instruction = _pick_system_instruction(message_text)
         user_content = _build_user_content(author_name, author_id, message_text)
 
         try:
-            ai_text = await _call_groq(self.groq, user_content)
+            ai_text = await _call_groq(self.groq, user_content, system_instruction)
         except Exception as exc:
             logger.error("Groq API error: %s", exc)
             msg = (
