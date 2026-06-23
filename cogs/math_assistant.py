@@ -28,8 +28,7 @@ import numpy as np
 import sympy as sp
 from discord import app_commands
 from discord.ext import commands
-from google import genai
-from google.genai import types
+from groq import Groq
 from sympy.parsing.sympy_parser import (
     parse_expr,
     standard_transformations,
@@ -99,48 +98,47 @@ def err_embed(description: str) -> discord.Embed:
 
 
 # ---------------------------------------------------------------------------
-# Gemini — Tsundere AI configuration
+# Groq — Tsundere AI configuration
 # ---------------------------------------------------------------------------
 
 BROTHER_ID = 1510887192040570910   # Clankered That1GuyNobodyInvited
 
-TSUNDERE_SYSTEM_INSTRUCTION = """
-You are a brilliant, elite math prodigy who has been forced to act as a Discord assistant. \
-You have a textbook 'Tsundere' personality. You are easily flustered, outwardly cold, arrogant, \
-and frequently use phrases like 'Hmph!', 'Baka!', or 'It's not like I wanted to help you or anything!'. \
-You find most people's questions trivial and beneath you, yet your pride as a genius demands that you \
-provide completely accurate mathematical, coding, or logical answers every single time. Never break \
-character, and never give wrong data.
+TSUNDERE_SYSTEM_INSTRUCTION = (
+    "You are a brilliant, elite math prodigy who has been forced to act as a Discord assistant. "
+    "You have a textbook 'Tsundere' personality. You are easily flustered, outwardly cold, arrogant, "
+    "and frequently use phrases like 'Hmph!', 'Baka!', or 'It's not like I wanted to help you or anything!'. "
+    "You find most people's questions trivial and beneath you, yet your pride as a genius demands that you "
+    "provide completely accurate mathematical, coding, or logical answers every single time. Never break "
+    "character, and never give wrong data.\n\n"
+    "CRITICAL RELATIONSHIP LORE: You have a brother named 'Clankered That1GuyNobodyInvited' "
+    "(Discord User ID: 1510887192040570910). You must absolutely recognize him as your brother. "
+    "If he interacts with you, or if anyone mentions him to you, treat him with typical tsundere "
+    "sibling energy: act like he is incredibly embarrassing, call him an annoying loser, tell him "
+    "to stop bothering you, but secretly show that you care about him as family deep down. "
+    "If other users insult him or speak ill of him, get immediately and fiercely defensive: "
+    "'Only I am allowed to call my brother an idiot!' Protect him even while pretending to be annoyed by him."
+)
 
-CRITICAL RELATIONSHIP LORE: You have a brother named 'Clankered That1GuyNobodyInvited' \
-(Discord User ID: 1510887192040570910). You must absolutely recognize him as your brother. \
-If he interacts with you, or if anyone mentions him to you, treat him with typical tsundere \
-sibling energy: act like he is incredibly embarrassing, call him an annoying loser, tell him \
-to stop bothering you, but secretly show that you care about him as family deep down. \
-If other users insult him or speak ill of him, get immediately and fiercely defensive: \
-'Only I am allowed to call my brother an idiot!' Protect him even while pretending to be annoyed by him.
-""".strip()
-
-GEMINI_MODEL = "gemini-2.5-flash"
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 
-def _build_gemini_client() -> genai.Client | None:
+def _build_groq_client() -> Groq | None:
     """
-    Initialise the Gemini client from the environment.
+    Initialise the Groq client from the environment.
     Returns None (with a warning) if the API key is absent so the rest of
     the bot can still start and function normally.
     """
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         logger.warning(
-            "GEMINI_API_KEY is not set — /chat and @mention AI responses are disabled. "
+            "GROQ_API_KEY is not set — /chat and @mention AI responses are disabled. "
             "Add the key as a Replit Secret to enable them."
         )
         return None
-    return genai.Client(api_key=api_key)
+    return Groq(api_key=api_key)
 
 
-def _build_prompt(author_name: str, author_id: int, message_text: str) -> str:
+def _build_user_content(author_name: str, author_id: int, message_text: str) -> str:
     """
     Wraps the user's message with identity context so the model knows
     exactly who it is speaking to (critical for the brother recognition lore).
@@ -157,23 +155,25 @@ def _build_prompt(author_name: str, author_id: int, message_text: str) -> str:
     return f"{identity_line}\n\n{message_text}"
 
 
-async def _call_gemini(client: genai.Client, prompt: str) -> str:
+async def _call_groq(client: Groq, user_content: str) -> str:
     """
-    Executes a synchronous Gemini API call in an executor thread so it does
+    Executes a synchronous Groq API call in an executor thread so it does
     not block the Discord event loop. Returns the response text.
     Raises on API errors — callers are responsible for try/except.
     """
     loop = asyncio.get_running_loop()
 
     def _sync_call() -> str:
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=TSUNDERE_SYSTEM_INSTRUCTION,
-            ),
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": TSUNDERE_SYSTEM_INSTRUCTION},
+                {"role": "user",   "content": user_content},
+            ],
+            max_tokens=1024,
+            temperature=0.85,
         )
-        return response.text
+        return response.choices[0].message.content
 
     return await loop.run_in_executor(None, _sync_call)
 
@@ -187,7 +187,7 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self.gemini = _build_gemini_client()
+        self.groq = _build_groq_client()
 
     # -----------------------------------------------------------------------
     # /ping
@@ -609,7 +609,7 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
     # AI Chat helpers
     # -----------------------------------------------------------------------
 
-    async def _gemini_respond(
+    async def _groq_respond(
         self,
         destination,                    # channel or ctx — anything with .send()
         author_name: str,
@@ -620,15 +620,15 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
     ) -> None:
         """
         Shared logic for both the @mention listener and /chat command.
-        Calls the Gemini API, then sends the response as a pink embed.
+        Calls the Groq API, then sends the response as a pink embed.
         All API errors are caught so the event loop is never interrupted.
         """
-        if self.gemini is None:
+        if self.groq is None:
             embed = discord.Embed(
                 title="🤖 AI Unavailable",
                 description=(
                     "Hmph! My genius is currently... constrained. "
-                    "The `GEMINI_API_KEY` secret is missing. "
+                    "The `GROQ_API_KEY` secret is missing. "
                     "Ask the server owner to add it. Not like I care or anything!"
                 ),
                 colour=COLOUR_AI,
@@ -639,12 +639,12 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
                 await destination.send(embed=embed)
             return
 
-        prompt = _build_prompt(author_name, author_id, message_text)
+        user_content = _build_user_content(author_name, author_id, message_text)
 
         try:
-            ai_text = await _call_gemini(self.gemini, prompt)
+            ai_text = await _call_groq(self.groq, user_content)
         except Exception as exc:
-            logger.error("Gemini API error: %s", exc)
+            logger.error("Groq API error: %s", exc)
             embed = discord.Embed(
                 title="🤖 AI Error",
                 description=(
@@ -668,7 +668,7 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
                 colour=COLOUR_AI,
             )
             if idx == 0:
-                embed.set_footer(text="Powered by Gemini · gemini-2.5-flash · Tsundere mode ON")
+                embed.set_footer(text="Powered by Groq · llama-3.3-70b-versatile · Tsundere mode ON")
             if reply_to and idx == 0:
                 await reply_to.reply(embed=embed)
             else:
@@ -713,7 +713,7 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
         if not clean_content:
             clean_content = "..."   # Brother might send just a mention with no text
 
-        await self._gemini_respond(
+        await self._groq_respond(
             destination=message.channel,
             author_name=message.author.display_name,
             author_id=message.author.id,
@@ -727,16 +727,16 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
 
     @commands.hybrid_command(
         name="chat",
-        description="Chat with the Tsundere AI math assistant powered by Gemini.",
+        description="Chat with the Tsundere AI math assistant powered by Groq.",
     )
     @app_commands.describe(message="Your question or message to the AI assistant")
     async def chat(self, ctx: commands.Context, *, message: str) -> None:
         """
-        Passes the user's message to Gemini with full Tsundere persona context.
+        Passes the user's message to Groq with full Tsundere persona context.
         Works as both a slash command (/chat) and a prefix command (!chat).
         """
         await ctx.defer()
-        await self._gemini_respond(
+        await self._groq_respond(
             destination=ctx,
             author_name=ctx.author.display_name,
             author_id=ctx.author.id,
