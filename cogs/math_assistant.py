@@ -188,6 +188,8 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.groq = _build_groq_client()
+        # Channels where every message gets an AI auto-reply (toggled by /autoreply2)
+        self.autoreply_channels: set[int] = set()
 
     # -----------------------------------------------------------------------
     # /ping
@@ -681,28 +683,32 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         """
-        Fires a Tsundere AI response when:
-          a) The bot is @mentioned by any user, OR
+        Fires a Tsundere AI response when ANY of these is true:
+          a) The bot is @mentioned by any user.
           b) The brother (BROTHER_ID) sends any message in a guild channel.
+          c) The channel has auto-reply enabled via /autoreply2.
 
         Guards:
           - Never replies to itself (infinite-loop prevention).
           - Never replies to other bots (prevents bot-to-bot loops).
-          - Strips the @mention from the content before sending to Gemini.
+          - Strips @mention tokens before sending to Groq.
         """
-        # --- Loop prevention ----------------------------------------------
+        # --- Loop prevention — never reply to self under any circumstance ---
         if message.author.id == self.bot.user.id:
             return
-        if message.author.bot:
+
+        is_mention   = self.bot.user in message.mentions
+        is_brother   = message.author.id == BROTHER_ID
+        is_autoreply = message.channel.id in self.autoreply_channels
+
+        # Block other bots UNLESS autoreply2 is active for this channel
+        if message.author.bot and not is_autoreply:
             return
 
-        is_mention = self.bot.user in message.mentions
-        is_brother = message.author.id == BROTHER_ID
-
-        if not (is_mention or is_brother):
+        if not (is_mention or is_brother or is_autoreply):
             return
 
-        # Strip @mention tokens so Gemini doesn't get confused by raw IDs
+        # Strip @mention tokens so Groq doesn't get confused by raw IDs
         clean_content = message.content
         for mention in message.mentions:
             clean_content = clean_content.replace(f"<@{mention.id}>", "").replace(
@@ -711,7 +717,7 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
         clean_content = clean_content.strip()
 
         if not clean_content:
-            clean_content = "..."   # Brother might send just a mention with no text
+            clean_content = "..."
 
         await self._groq_respond(
             destination=message.channel,
@@ -742,6 +748,50 @@ class MathAssistant(commands.Cog, name="Math Assistant"):
             author_id=ctx.author.id,
             message_text=message,
         )
+
+    # -----------------------------------------------------------------------
+    # /autoreply2 (alias: ar2) — owner-only channel AI toggle
+    # -----------------------------------------------------------------------
+
+    @commands.hybrid_command(
+        name="autoreply2",
+        aliases=["ar2"],
+        description="Owner only: toggle AI auto-reply for every message in this channel.",
+    )
+    @commands.is_owner()
+    async def autoreply2(self, ctx: commands.Context) -> None:
+        """
+        Toggles AI auto-reply on or off for the current channel.
+        When ON, the bot replies to EVERY message in this channel with the
+        Tsundere AI — including messages from other bots.
+        Run again to toggle off.
+        """
+        channel_id = ctx.channel.id
+
+        if channel_id in self.autoreply_channels:
+            self.autoreply_channels.discard(channel_id)
+            embed = discord.Embed(
+                title="🔕 Auto-Reply OFF",
+                description=(
+                    f"Hmph! Fine, I'll stop replying to every little thing in "
+                    f"{ctx.channel.mention}. It's not like I enjoyed it anyway!"
+                ),
+                colour=discord.Colour.red(),
+            )
+        else:
+            self.autoreply_channels.add(channel_id)
+            embed = discord.Embed(
+                title="🔔 Auto-Reply ON",
+                description=(
+                    f"I-it's not like I *want* to respond to everything in "
+                    f"{ctx.channel.mention}! But fine... I'll grace every message "
+                    f"with my genius. Don't get used to it, Baka!"
+                ),
+                colour=COLOUR_AI,
+            )
+
+        embed.set_footer(text=f"Active auto-reply channels: {len(self.autoreply_channels)}")
+        await ctx.send(embed=embed)
 
 
 # ---------------------------------------------------------------------------
